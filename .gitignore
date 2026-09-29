@@ -1,0 +1,3 @@
+*/__pycache__
+q3/document_pb2.py
+q3/document_pb2_grpc.py

@@ -44,10 +44,6 @@ message UpdateRequest {
   string name = 1;
 }
 
-message UpdateResponse {
-  bool success = 1;
-}
-
 message DocumentUpdate {
   string name = 1;
   string content = 2;

@@ -6,13 +6,21 @@ import document_pb2_grpc
 
 def listen_for_updates(stub, document_name):
     request = document_pb2.UpdateRequest(name=document_name)
-    status_printed = false
+    status_printed = False
     try:
         for update in stub.SubscribeToUpdates(request):
-            print(f"\n[Update] Document {update.name} modified.")
+            # only print this if it doesn't fail (i.e. document exists)
+            if not status_printed:
+                print(f"\n[Client] Subscribed to updates for {document_name}.\n")
+                print("> ", end="", flush=True)
+
+            print(f"\n[Update] Document {update.name} modified.\n", end="")
             print(update.content)
             print("> ", end="", flush=True)
     except grpc.RpcError:
+        # occurs if document doesn't exist (or if server fails but ignore that)
+        print(f"\n[Client] Document {document_name} not found.\n")
+        print("> ", end="", flush=True)
         pass
 
 def main():
