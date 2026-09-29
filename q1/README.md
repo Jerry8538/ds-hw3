@@ -12,6 +12,9 @@ When writing a matrix to a file, it is formatted as key-value pairs, where each 
 For a basic test, navigate to test/ and run: `cd test; ./run.sh` \
 To benchmark, navigate to benchmark/ and run: `cd benchmark; ./benchmark`
 
+# Correctness
+`verify.py` calculates the product sequentially, then compares it to the `out` file. After all tests, the verification was done by running `python verify.py` in the directory where A, B, and out are present.
+
 # Performance
 
 ## Edgecase: 1xM x MxN
