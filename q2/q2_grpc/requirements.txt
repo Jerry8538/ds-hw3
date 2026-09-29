@@ -1,0 +1,3 @@
+# the only python packages needed to RUN Q2 (also on the cluster)
+grpcio>=1.60
+protobuf>=7.35.1   # the generated weather_pb2.py needs at least this version

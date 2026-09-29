@@ -1,0 +1,523 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{../q1_mapreduce/plots/}{../q2_grpc/plots/}{../q2_grpc/screenshots/}}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{4pt}
+\setlength{\parindent}{0pt}
+\newcommand{\code}[1]{\texttt{#1}}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.85}
+
+\title{Distributed Systems HW3 -- Section 2\\
+\large Weather Data Analytics (HW2 Q8) using MapReduce and gRPC}
+\author{Rajai Tarun Kanaiyalal (2025201034) \and Yash Khator (2024101133)}
+\date{}
+
+\begin{document}
+\maketitle
+
+%=====================================================================
+\section{Q1: Batch analytics using MapReduce}
+
+In HW2 we solved the weather analytics problem (Q8) with a sequential program and with MPI. Here we solve the same problem,
+with the same input and output, using MapReduce, and then compare it with our MPI program. The code and the full run
+instructions are in \code{q1\_mapreduce/README.md}.
+
+\subsection{How we ran it}
+The assignment asks for Hadoop Streaming. Hadoop is not installed on the RCE cluster (there is no Hadoop module), and the
+course told us to use a Slurm script until it is fixed. So we wrote the mapper, combiner and reducer as normal C++ programs
+that read from stdin and write \code{key<TAB>value} lines to stdout. This is exactly what Hadoop Streaming expects, so the same
+programs will also run on Hadoop without any change. Our Slurm script does the same steps that Hadoop would do:
+
+\begin{enumerate}
+\item \textbf{Split}: cut the input file into $P$ pieces (one per mapper).
+\item \textbf{Map}: $P$ tasks run in parallel, each doing \code{mapper | sort | combiner} on its own piece.
+\item \textbf{Shuffle}: the master merges all the sorted combiner outputs into one sorted file.
+\item \textbf{Reduce}: one reducer reads that file and prints the final answer.
+\end{enumerate}
+
+\subsection{Our MapReduce design}
+We use \textbf{one MapReduce job}: mapper, combiner and a single reducer; the combiner is the only extra aggregation step.
+
+\textbf{Mapper (how the input is processed).} The mapper reads its piece of the input line by line from stdin. A line with 3
+values is the header \code{N K S}; the mapper only prints \code{K}. (When the input is split, only the first piece contains the
+header, which is fine.) A line with 7 values is a measurement; any other line is skipped. For every measurement the mapper prints
+three \code{key<TAB>value} lines (the \emph{intermediate information}), using these keys. The measurement values are printed exactly
+as the text it read, so nothing is lost:
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+Key & Value & How two values are combined \\
+\midrule
+\code{G} & count, sums, min/max, extreme count, hottest, coldest & add, min/max, hotter/colder \\
+\code{S<station>} & count, temperature sum, rainfall sum & add \\
+\code{I<interval>} & count (interval = timestamp / 60) & add \\
+\code{K} & the $K$ from the header line & keep \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The main idea: \textbf{one record is treated as a small partial result with count 1}. So the mapper output, the combiner
+input and the combiner output all have the same format, and the combiner and reducer only need to know how to merge two
+lines with the same key. Since the merges are just additions, mins and maxes, the order does not matter. The answer is the
+same no matter how the input is split or how many times the combiner runs. We never merge averages, only sums and counts,
+and divide at the very end.
+
+Top-$K$ stations and the busiest interval can only be decided after \emph{all} the counts are merged (the same bug we found in
+HW2 when each process kept its own top-$K$). That is why we use \textbf{one reducer}: it sees every station and every interval.
+
+\textbf{Combiner and reducer (how the information is combined).} Both read lines that are sorted by key, so all lines of one key
+come one after another. They add up consecutive lines with the same key using the merge rule of the table. The combiner then
+prints the merged line in the same format (it only makes the mapper's output smaller). The reducer instead keeps the result: the
+merged \code{G} values, $K$, a list of the $\le S$ stations, and the busiest interval so far (because the input is sorted, an
+interval's count is final when its key ends, so the intervals do not have to be stored).
+
+\textbf{Final analytics.} At the end the reducer computes the averages as sum / count, takes the minimum, maximum, total and
+extreme count directly from \code{G}, and the hottest and coldest measurement with HW2's tie-breaks (temperature, then smaller
+timestamp, then smaller station id). It sorts the stations by count (descending) and then station id (ascending) and prints the
+first $K$, and the busiest interval is the one with the most records (smaller id on a tie). Everything is printed in exactly the
+HW2 output format, with 6 decimals.
+
+\subsection{Important decisions}
+Table~\ref{tab:decisions} lists the main decisions we took, why, and what effect we measured.
+
+\begin{table}[!htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.8cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{4.2cm}}
+\toprule
+Decision & Why & Effect \\
+\midrule
+Use a combiner & The mapper prints 3 lines per record, and the same keys repeat a lot inside one piece. & 10M records: 30M $\to$ 7M lines sent to the reducer; 52\,s $\to$ 16\,s. \\
+Only one reducer & Top-$K$ and busiest interval need all the data in one place. & Reducer takes only 0.5--3.3\,s. \\
+Mapper prints the numbers exactly as read & Printing them as doubles turned \code{24.49} into \code{24.489999999999998}. & Mapper output 2.1$\times$ smaller. \\
+Read numbers with \code{strtod} & \code{stringstream} was very slow for millions of lines. & Combiner 2.9$\times$ faster. \\
+\code{LC\_ALL=C sort} & The normal \code{sort} can ignore the tab and mix up keys like \code{S1} and \code{S10}. & Correct grouping. \\
+Pipe \code{mapper|sort|combiner} & The full mapper output for 50M records is 7.5\,GB, but our disk quota is 10\,GB. & Nothing big is written to disk. \\
+Same data, same node as MPI & A fair comparison with HW2. & Differences come from the model, not the setup. \\
+\bottomrule
+\end{tabularx}
+\caption{Main design decisions.}
+\label{tab:decisions}
+\end{table}
+
+\subsection{Correctness}
+\begin{itemize}
+\item \textbf{Local tests (69, all pass)}: the 9 HW2 test cases with expected outputs (ties, extreme values, $K>S$, $N=0$) give
+the exact expected output. All 13 HW2 inputs plus generated 100K and 1M inputs, each split into 1, 2, 4 and 8 pieces, give the
+same output as the HW2 sequential program.
+\item \textbf{Cluster}: the same output as sequential on one node and on two nodes, and all 44 benchmark runs are correct.
+\end{itemize}
+
+\textbf{One small rounding difference.} From 10M records onwards, the last digits of \code{TOTAL\_RAINFALL} differ, e.g.\
+249966638.539998 (sequential) vs 249966638.540026 (MapReduce). The true value is 249966638.54, so both are slightly off.
+A \code{double} only keeps about 15--16 digits, and adding 10 million numbers in a different order gives a slightly different
+rounding. Our HW2 MPI program shows the same difference against sequential when it uses 1, 2 or 4 workers. So our checker
+(\code{compare\_outputs.py}) requires counts, ids and timestamps to match exactly, and allows decimal numbers to differ only by a
+relative $10^{-10}$ (or by one unit in the 6th decimal for a \emph{rounding tie}, see Q2). Every run passed: 15 matched exactly and
+25 differed only by this rounding.
+
+\subsection{Experimental setup}
+We used the HW2 dataset generator with seed 42, $K=10$ and $S=100$, and input sizes of 1M, 10M, 20M and 50M records (50M
+records is 2.1\,GB). The generator is reproducible (the same parameters always give the same file); it draws station ids
+uniformly from $[0,S-1]$, timestamps uniformly from $[0,10N]$ (about 6 records per 60-second interval), and the measurements
+uniformly from fixed ranges with 2 decimals. We ran MPI with 1, 2, 4 and 8 workers and MapReduce with 1, 2, 4 and 8 mappers,
+with and without the combiner (1M and 10M). All runs of one benchmark were in the same Slurm job, on one node, on the same data. We measured the total time of each run (including reading the input),
+the time of each MapReduce stage, and the peak memory of every process.
+
+\subsection{Results}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\textwidth]{runtime_vs_workers.png}
+\caption{Total time vs number of workers/mappers. Dashed line: HW2 sequential.}
+\label{fig:rt}
+\end{figure}
+
+\begin{table}[!htbp]
+\centering\small
+\begin{tabular}{rrrrrrrrrr}
+\toprule
+$N$ & Seq & MPI 1 & MPI 2 & MPI 4 & MPI 8 & MR 1 & MR 2 & MR 4 & MR 8 \\
+\midrule
+1M  & 1.00  & 1.09  & 1.09  & 1.11  & 2.47   & 4.81   & 3.55   & 2.43  & 1.72 \\
+10M & 11.22 & 10.78 & 10.70 & 11.19 & 22.98  & 50.51  & 26.83  & 18.24 & 16.16 \\
+20M & 23.87 & 22.25 & 21.88 & 22.61 & 47.21  & 101.77 & 57.13  & 38.03 & 32.91 \\
+50M & 63.65 & 56.74 & 55.78 & 58.06 & 113.48 & 253.44 & 142.90 & 95.46 & 81.50 \\
+\bottomrule
+\end{tabular}
+\caption{Total time in seconds (MR = MapReduce).}
+\label{tab:rt}
+\end{table}
+
+\paragraph{MPI is faster overall (Fig.~\ref{fig:rt}, Table~\ref{tab:rt}).}
+At 50M records the best MPI run takes 55.8\,s and the best MapReduce run takes 81.5\,s. Both grow linearly with the input size.
+MapReduce does much more work per record. MPI reads each record once into a small binary struct and sends structs. MapReduce
+turns each record into 3 text lines (151 bytes, 3.6 times bigger than the input), sorts all these lines, and then reads the
+numbers back from text in the combiner. With only one mapper, MapReduce is 4 times slower than sequential (253\,s vs 64\,s).
+
+\paragraph{MPI does not get faster with more workers.}
+From our HW2 timing logs, at 50M records rank 0 spends about 46\,s of the 56\,s just \emph{reading the input file alone}. The
+workers can only start after that, so adding more workers only speeds up the small compute part. With 8 workers the time even
+doubles, and the HW2 log shows that it is rank 0's reading that becomes twice as slow. Our best guess is that the 8 waiting MPI
+processes keep the CPUs busy while they wait, which slows down rank 0.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{speedup.png}
+\caption{Speedup of each implementation compared with its own 1-worker run. Dashed line: ideal speedup.}
+\label{fig:speedup}
+\end{figure}
+
+\paragraph{MapReduce gets faster with more mappers, but not 8 times faster (Fig.~\ref{fig:speedup}).}
+In MapReduce each mapper reads and processes its own piece, so the slow part is done in parallel. At 50M records MapReduce is
+3.1 times faster with 8 mappers than with 1. It does not reach 8 times because:
+\begin{itemize}
+\item \textbf{Splitting the input is done by one process} and always takes about 20\,s at 50M. That is 8\% of the time with 1
+mapper but 24\% with 8 mappers. (In real Hadoop this step does not exist, because HDFS already stores the file in pieces.)
+\item \textbf{Shuffle and reduce get slower with more mappers} (2\,s with 1 mapper, 9.5\,s with 8), because more mappers send
+more lines to the reducer (explained below).
+\item \textbf{Each map task gets only one CPU core.} Slurm gives every task 1 core, so the mapper, \code{sort} and combiner of one
+task (three programs) share that core. All 8 tasks also share one node's memory and disk.
+\end{itemize}
+
+\paragraph{Is it really running in parallel?}
+To be sure, we ran \code{check\_parallel.sh}: the map phase on 10M records in 8 pieces, where every task records its node, its CPU
+core and its start and end time, followed by the same 8 pieces run one after another. On one node, all 8 tasks started at the same
+moment (0.08\,s), ran on 8 different cores, and on average 7.8 of them were running at the same time. The parallel run took
+12.5\,s versus 45.9\,s one after another (3.7$\times$ faster), with identical output. It is not 8$\times$ because each task has only one
+core for its three programs, while the one-after-another run could spread one pipeline over several cores. With \code{-{}-nodes=4}
+the tasks ran on 4 different nodes (2 per node), so the multi-node run really is spread over machines.
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{mr_stage_breakdown.png}\caption{Time of each stage, 50M records.}\label{fig:stages50}\end{subfigure}\hfill
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{map_phase_stages.png}\caption{Map phase split into parts, 10M records, 4 mappers.}\label{fig:mapstages}\end{subfigure}
+\caption{Where MapReduce spends its time.}
+\end{figure}
+
+\paragraph{Where the time goes (Fig.~\ref{fig:stages50}, \ref{fig:mapstages}).}
+The map phase (mapper + sort + combiner) takes almost all the time: 232 of 253\,s with 1 mapper at 50M. To see what is inside
+it, we also ran the three parts separately (10M records, 4 mappers): the mapper took 17.7\,s, the sort 16.4\,s and the combiner
+only 4.4\,s. So most of the time is spent on \textbf{converting records to text and sorting them}, not on the actual
+analytics. The mapper is slow because it splits every line into words and writes 1.5\,GB of text for 10M records.
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.52\textwidth}\includegraphics[width=\linewidth]{shuffle_lines.png}\caption{Lines sent to the reducer.}\label{fig:shuffle}\end{subfigure}\hfill
+\begin{subfigure}{0.46\textwidth}\includegraphics[width=\linewidth]{multinode.png}\caption{1 node vs 4 nodes, 50M records, 8 mappers.}\label{fig:multinode}\end{subfigure}
+\caption{Data sent to the reducer, and running on more nodes.}
+\end{figure}
+
+\paragraph{More mappers send more data to the reducer (Fig.~\ref{fig:shuffle}).}
+With 1 mapper at 50M, 8.3M lines reach the reducer; with 8 mappers, 35.2M lines. The reason: each mapper's combiner can only
+merge the lines of its \emph{own} piece. If the records of one interval are spread over 5 pieces, that interval is sent 5 times.
+Almost all of these lines are interval lines: there are about 8.3M intervals with only about 6 records each, so they get spread
+over many pieces. We checked this with a simple formula: an interval with on average 6 records, split randomly over $P$ pieces,
+appears in $P(1-e^{-6/P})$ pieces. This predicts 8.31M, 15.84M, 25.90M and 35.18M lines for 1, 2, 4 and 8 mappers, which matches
+our measurements.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{combiner_effect.png}
+\caption{MapReduce with and without the combiner, 10M records.}
+\label{fig:comb}
+\end{figure}
+
+\paragraph{The combiner makes a big difference (Fig.~\ref{fig:comb}).}
+Without the combiner, all 3 lines of every record go to the one reducer: 30M lines at 10M records. The shuffle then takes
+about 15\,s and the reducer 13\,s, instead of less than 1.3\,s each. With 8 mappers the whole run is 3.2 times faster with the
+combiner (16\,s vs 52\,s). Without it, adding mappers barely helps, because the single reducer becomes the bottleneck.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.68\textwidth]{memory.png}
+\caption{Peak memory of each process, 50M records (log scale).}
+\label{fig:mem}
+\end{figure}
+
+\paragraph{MapReduce uses much less memory (Fig.~\ref{fig:mem}).}
+This is where MapReduce clearly wins. In MPI, rank 0 reads \emph{all} the records into memory before sending them out: 50M
+records $\times$ 56 bytes is about 2.8\,GB, plus the hash map of all the intervals. So rank 0 used 3.4\,GB and each worker
+around 1\,GB, which is 7.6\,GB for the whole run with 4 workers. Our MapReduce programs only look at one line at a time: the
+mapper, combiner and reducer each used about 3.5\,MB, and \code{sort} used about 15\,MB (it writes to temporary files on disk when
+needed). The whole MapReduce run used only 91\,MB, about \textbf{80 times less}. This means MPI cannot handle data bigger than
+one machine's memory, while MapReduce can.
+
+\paragraph{Running on 4 nodes was slower (Fig.~\ref{fig:multinode}).}
+We also spread the 8 mappers over 4 nodes. This made the run slower (82\,s $\to$ 109\,s); only the map phase got slower. The
+reason is that \textbf{the nodes are not equally fast}. All our 1-node runs happened on node06, but the 4-node run also used
+node01--03. In the parallelism check, the same pieces took 11.9\,s on node06 but 14.1--15.3\,s on node01--03, and running all 8
+pieces one after another took 45.9\,s on node06 but 60.7\,s on node01. The map phase can only finish when the \emph{slowest} node
+finishes, so the slower nodes decide the time. (At first we thought reading the pieces over the shared network drive was the
+cause, but then node01, which wrote the pieces, would have been the fastest, and it was not.) Real Hadoop handles slow nodes
+by starting a backup copy of a slow task on another node (\emph{speculative execution}), and it stores the input on the
+workers' own disks (HDFS), so each map task can read its piece locally.
+
+\subsection{MPI vs MapReduce: summary}
+\begin{center}\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+ & MPI (HW2) & MapReduce \\
+\midrule
+Time at 50M (best) & \textbf{55.8\,s} & 81.5\,s \\
+Speedup, 1 $\to$ 8 workers & none (rank 0 reads the input alone) & \textbf{3.1$\times$} \\
+Memory at 50M & 7.6\,GB (3.4\,GB on rank 0) & \textbf{91\,MB} \\
+Data sent & binary structs & text lines, reduced by the combiner \\
+Code we had to write & custom MPI datatype, scatter, 9 different send/receive messages, merging & 3 small programs, no communication code \\
+Adding a new statistic & change the struct, the messages and the merge & add one new key \\
+If a process crashes & the whole job fails & Hadoop re-runs only that task \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{Conclusion.} For our 2\,GB input on one machine, MPI is faster because it works on binary data in memory. MapReduce
+is slower because of all the text conversion and sorting, but it gets faster with more mappers, uses 80 times less memory, and
+was much simpler to write. For data that does not fit on one machine, MapReduce is the better choice.
+
+%=====================================================================
+\section{Q2: Real-time streaming analytics using gRPC}
+
+Here the same Q8 analytics run on a \emph{stream}: records arrive one after another, and the analytics must be up to date
+at any moment while data is still coming in. As instructed by the TAs, Q2 is written in \textbf{Python with \code{grpcio}}.
+The code and run instructions are in \code{q2\_grpc/README.md}.
+
+\subsection{Architecture}
+\begin{center}\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3.8cm}>{\raggedright\arraybackslash}X}
+\toprule
+Program & Role \\
+\midrule
+\code{client.py} & reads the dataset and streams it to the coordinator in batches, at a chosen rate \\
+\code{coordinator.py} & gRPC server: splits every batch between the workers, answers queries by merging the workers' results \\
+\code{worker.py} ($W$ processes) & gRPC server: keeps a \code{Stats} object for the records it gets \\
+\code{dashboard.py} & CLI dashboard: live view of the analytics; also \code{-{}-once}, \code{-{}-bench}, \code{-{}-shutdown} \\
+\code{weather\_stats.py} & the Q8 analytics in Python (port of HW2's \code{q8\_common.cpp}): update, merge, top-$K$, output \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The client sends the header ($N$, $K$, $S$) with \code{Configure}, then the records over one \code{StreamRecords} call. The
+coordinator splits each batch into one small batch per worker and puts it into that worker's \textbf{queue}; one \textbf{sender
+thread per worker} sends the batches with \code{ProcessBatch}, so all workers get data at the same time. Each worker adds its
+records to its own \code{Stats} object, exactly like an HW2 MPI worker. When a dashboard calls \code{GetAnalytics}, the
+coordinator asks all workers for their partial \code{Stats} at the same time (\code{GetPartial}), merges them with the same
+merge rule as HW2, and returns the result in the HW2 output format together with live counters (records received and
+processed, ingest rate, records per worker). Because merging works at any moment, a query in the middle of the stream
+simply shows the analytics of the records processed so far.
+
+\subsection{The gRPC interface}
+\begin{center}\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{1.8cm}>{\raggedright\arraybackslash}p{6.3cm}>{\raggedright\arraybackslash}X}
+\toprule
+Service & RPC & Why \\
+\midrule
+Coordinator & \code{Configure(StreamConfig) $\to$ Ack} & sends $N,K,S$ and resets the analytics, so the system can be reused \\
+            & \code{StreamRecords(stream RecordBatch) $\to$ Ack} & \textbf{client streaming}: the whole dataset over one call; returns when all is processed \\
+            & \code{GetAnalytics $\to$ AnalyticsReply} & current analytics (HW2 text) + live counters, any time during the stream \\
+Worker      & \code{Configure}, \code{ProcessBatch(RecordBatch)} & a worker gets its share in batches \\
+            & \code{GetPartial $\to$ PartialStats} & the worker's partial \code{Stats} (same fields as HW2's struct) \\
+Both        & \code{Shutdown} & used by our scripts to stop the system \\
+\bottomrule
+\end{tabularx}
+\end{center}
+A \code{RecordBatch} holds many records, so the client decides how many records go into one message (the batch size).
+
+\subsection{Important decisions}
+\begin{itemize}
+\item \textbf{Distribution strategy.} By default a record goes to worker $\lfloor t/60\rfloor \bmod W$ (\emph{by interval}), so every
+60-second interval lives on exactly one worker. Then each worker knows the complete count of its intervals, and it only has to
+report its single busiest interval: the global busiest interval is the best of these. A query message stays small (the global
+fields, $S$ station totals and one interval), however much data has arrived. For comparison we also implemented
+\emph{round-robin} (records to the workers in turn): perfectly even load, but the records of one interval end up on several
+workers, so every query must send all interval counts of every worker. Top-$K$ works with both: all $S=100$ station totals
+are sent and added up before the top $K$ are chosen.
+\item \textbf{One process per worker.} In Python only one thread per process can run Python code at a time (the GIL), so
+workers are separate processes; they then really compute in parallel. Threads are still used for waiting on the network.
+\item \textbf{Concurrency.} A worker's \code{ProcessBatch} and \code{GetPartial} can arrive at the same time (gRPC uses a thread
+pool), so a lock protects its \code{Stats}: a query always sees whole batches. The coordinator's queues have a maximum size, so a
+slow worker slows the stream down (\emph{back pressure}) instead of filling the memory. \code{StreamRecords} returns only when all
+queues are empty, so the answer after the stream always includes every record.
+\item \textbf{Busiest interval kept up to date.} At first a worker found its busiest interval by scanning all its intervals on every
+query, while holding its lock. With dashboards querying non-stop this blocked the workers most of the time (4 dashboards: 45K
+records/s). Since counts only go up, it is enough to compare the one interval that just changed with the current best, so
+\code{update()} now keeps the busiest interval up to date and a query just reads it.
+\item \textbf{Cluster setup.} The cluster's default Python is 3.6, too old for grpcio, so we use Python 3.11 in a virtual
+environment with only \code{grpcio} and \code{protobuf} (the generated gRPC code is committed; plots are made on the laptop).
+The cluster also sets \code{http\_proxy}, and Python gRPC would send even local connections through it, so all our channels
+switch the proxy off (\code{grpc.enable\_http\_proxy = 0}).
+\end{itemize}
+
+\subsection{Correctness}
+\code{verify\_correctness.sh} runs 253 checks, both on the laptop and on the RCE cluster (all passed on both):
+our Python analytics against HW2's C++ \code{sequential} on all 13 test cases; all 13 test cases through the gRPC system with
+1, 2 and 4 workers, both strategies and batch sizes 1, 7 and 1000 (234 runs); 100K and 1M generated records; and 4 dashboards
+querying non-stop during a 1M-record stream, where no query failed, the processed count never went down and never exceeded
+$N$, and the final result was correct. Every benchmark run below is also checked against \code{sequential}.
+
+Besides the rounding of very large sums (Q1), one more rounding effect appeared: a \textbf{rounding tie}. Every input value has
+2 decimals, so the sum of the temperatures is a multiple of 0.01, and the average over $N=20{,}000$ records is a multiple of
+0.0000005. The exact average can therefore lie exactly halfway between two 6-decimal numbers (e.g.\ 14.9807675), and the tiny
+rounding error of the sum decides whether it is printed as 14.980767 or 14.980768. \code{compare\_outputs.py} therefore also
+accepts a difference of one unit in the 6th decimal; counts, ids and the top-$K$ order must still match exactly.
+
+\subsection{Demo on the RCE cluster}\label{sec:q2demo}
+Following the RCE guide, \code{run\_cluster.sh} (inside \code{salloc -{}-nodes=4}) started the coordinator on node01 and 4 workers
+on node02, node03 and node06. The two dashboards ran on node03 and node06 and the client on node02, each in its own terminal,
+so every connection went over the cluster network. The client streamed 1M records at 100{,}000 records/s. While the stream was
+running, both dashboards showed the growing analytics (Fig.~\ref{fig:demo}, left: 405{,}000 records after 4\,s, queries in about
+10\,ms). At the end they showed all 1{,}000{,}000 records (right), and the final analytics are exactly the HW2 \code{sequential}
+output for this dataset (e.g.\ \code{AVERAGE\_TEMPERATURE 14.999518}, \code{TOTAL\_RAINFALL 24999581.170000} and the same top-10
+stations).
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{intermediate_state.png}\caption{During the stream (node03).}\end{subfigure}\hfill
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{final_state.png}\caption{After the stream.}\end{subfigure}
+\caption{The CLI dashboard during the cluster demo (coordinator on node01, 4 workers, client on node02).}
+\label{fig:demo}
+\end{figure}
+
+\subsection{Experimental setup}
+The benchmarks ran on a laptop (Apple M4: 4 performance + 6 efficiency cores, 16\,GB; Python 3.13, grpcio 1.84), with every
+program as a separate process on \code{localhost}; the TAs allowed running gRPC locally, and the cluster queue was full close to
+the deadline. Correctness (253/253) and the multi-node demo (Section~\ref{sec:q2demo}) were done on the RCE cluster. Datasets come from the HW2 generator
+(seed 42, $K=10$, $S=100$): 5M records for most runs, 200K for the batch-size runs. Every run starts a fresh system, and its
+final result is checked against HW2's \code{sequential}: all 22 runs were correct (5 \code{EXACT}, 17 \code{FP\_CLOSE}).
+The client builds all messages before it starts, and the time is measured from the first record sent until the coordinator
+confirms that \emph{all} records are processed (end to end). On a laptop, repeated runs can differ by up to about 30\%.
+The generator draws timestamps uniformly from $[0, 10N]$ (about 6 records per 60-second interval) and the values uniformly from
+fixed ranges with 2 decimals (details and the exact commands are in the README).
+
+\textbf{Why these configurations.} 5M records make every run last several seconds (3.5--35\,s), so start-up costs and noise
+matter less, while all 22 runs still fit in about 15 minutes. Batch size 1000 is used everywhere else because the batch-size
+experiment shows it already reaches most of the maximum speed. 1 to 8 workers covers the laptop's 10 cores (with 8 workers the
+processes already outnumber the cores). The workers experiment uses one dashboard refreshing every 100\,ms, like a real live
+view; the queries experiment uses dashboards that query back to back, the worst case. The requested rates go from well below
+to just above the measured maximum.
+
+\subsection{Results}
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{throughput_vs_workers.png}\caption{Throughput vs workers.}\label{fig:q2workers}\end{subfigure}\hfill
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{query_latency_strategy.png}\caption{Query latency vs workers.}\label{fig:q2latency}\end{subfigure}
+\caption{Number of workers and distribution strategy (5M records, batch 1000, one dashboard querying every 100\,ms).}
+\end{figure}
+
+\paragraph{More workers help, up to the coordinator's limit (Fig.~\ref{fig:q2workers}).}
+With the interval strategy the throughput goes from 0.77M records/s (1 worker) to 1.32M (2) and 1.44M (4). Unlike in C++,
+the analytics in Python is real work: one worker alone manages about 0.8M records/s, so a second worker almost doubles the
+speed. After that the \textbf{coordinator} becomes the limit: it is a single Python process that touches every record to decide
+which worker gets it. With 8 workers it drops to 0.97M: 8 workers, the coordinator, the client and the dashboard are 11 busy
+processes on 10 cores (6 of them slower efficiency cores), so they slow each other down.
+
+\paragraph{The distribution strategy matters a lot (Fig.~\ref{fig:q2latency}).}
+With round-robin, the \emph{same} runs reach only 0.15--0.22M records/s, and a query takes 0.56--1.07\,s instead of
+1.3--11\,ms. The reason is the busiest interval: with round-robin every worker has a part of almost every interval (about
+830K intervals at 5M records), so for every query each worker must put all its interval counts into the reply, while holding
+its lock. That takes most of a second, and a dashboard asks every 100\,ms, so the workers are blocked most of the time and
+ingestion collapses. With the interval strategy a worker sends only its busiest interval, so a reply is tiny whatever the amount
+of data. Round-robin has perfectly even load (exactly 1.25M records per worker at $W=4$), but the interval strategy is almost as
+even (1.248M--1.252M) because timestamps are spread uniformly. Query latency grows a little with $W$ for the interval strategy
+(more workers to ask and more partial results to merge, and more processes sharing the cores).
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{throughput_vs_batch.png}\caption{Throughput vs batch size (200K records).}\label{fig:q2batch}\end{subfigure}\hfill
+\begin{subfigure}{0.49\textwidth}\includegraphics[width=\linewidth]{rate.png}\caption{Requested vs achieved stream rate (5M).}\label{fig:q2rate}\end{subfigure}
+\caption{How the records are streamed (4 workers, interval strategy).}
+\end{figure}
+
+\paragraph{Batch size: every message has a fixed cost (Fig.~\ref{fig:q2batch}).}
+With 1 record per message the system manages only 7.3K records/s; with 10 records 25.5K, 100 records 285K, 1000 records 1.16M
+and 10000 records 1.35M. Every message costs the same fixed amount of work, whatever its size: gRPC framing, a Python call on
+both sides, and a hand-over between threads, once from the client to the coordinator and once more from the coordinator to
+each worker. With 1 record per message that is about 130\,$\mu$s per record, so 200K records take 27\,s. With 1000 or more
+records per message the fixed cost is shared by many records and the per-record work (reading and updating the statistics)
+dominates, so bigger batches help less and less.
+
+\paragraph{Stream rate: the system keeps up to about 1.4M records/s (Fig.~\ref{fig:q2rate}).}
+When the client sends at a fixed rate, the system processes exactly that rate: 200K, 400K and 800K records/s requested gave
+199,999, 399,989 and 799,951 records/s. At 1.6M requested it reaches only 1.40M, the same as without any limit (1.36M): that is
+the maximum speed of this setup. If the stream is faster than that, the coordinator's full queues make the stream wait
+(back pressure), so nothing is lost and the memory does not grow; the data just arrives later.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{concurrent_queries.png}
+\caption{Dashboards querying non-stop during the stream (5M records, 4 workers, interval strategy).}
+\label{fig:q2queries}
+\end{figure}
+
+\paragraph{Queries during the stream cost ingestion speed (Fig.~\ref{fig:q2queries}).}
+With 0, 1, 4 and 16 dashboards querying back to back, the throughput goes from 1.44M to 1.09M, 0.77M and 0.58M records/s,
+and the median query latency from 3.3 to 6.0 and 19\,ms. The queries still get fast answers (16 dashboards together answered
+about 7,200 queries in 12\,s), but every query takes each worker's lock for a moment and runs in the coordinator's Python
+process, which also routes the stream, so the two compete. A normal dashboard that refreshes every few hundred milliseconds
+costs almost nothing; only many dashboards querying non-stop slow the stream down noticeably. (This is after the fix that
+keeps the busiest interval up to date; before it, 4 non-stop dashboards brought the stream down to 45K records/s.)
+
+
+\paragraph{Memory and CPU.}
+We measured every process of one run (5M records, 4 workers, one dashboard every 100\,ms) with \code{measure\_resources.sh}:
+\begin{center}\small
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{By interval} & \multicolumn{2}{c}{Round-robin} \\
+Process & peak memory & CPU time & peak memory & CPU time \\
+\midrule
+coordinator & 66\,MB & 5.8\,s & 646\,MB & 21.1\,s \\
+each worker & 60\,MB & 2.6\,s & 181--195\,MB & 7.0\,s \\
+client (5M records prepared as messages) & 563\,MB & 5.7\,s & 563\,MB & 5.9\,s \\
+dashboard & 33\,MB & 0.3\,s & 34\,MB & 0.3\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+Workers keep only statistics, never the records, so with the interval strategy they need about 60\,MB (mostly Python itself
+plus the interval counts) no matter how long the stream is. Round-robin needs 10$\times$ more memory in the coordinator and
+3--4$\times$ more CPU in total for the same data: every query copies all interval counts of every worker into messages, sends
+them, and merges them. The coordinator uses more CPU time than the run lasts (5.8\,s in 3.6\,s) because gRPC does its network work
+in its own threads, next to the Python thread that routes the records.
+
+\subsection{Streaming (gRPC) vs batch (MapReduce, MPI)}
+\begin{center}\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{2.8cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+\toprule
+ & MPI (HW2, C++) & MapReduce (Q1, C++) & gRPC streaming (Q2, Python) \\
+\midrule
+Data & complete file, in memory & complete file, on disk & records arrive continuously \\
+When is the answer ready & at the end & at the end & any time (queries take milliseconds) \\
+What limits the speed & rank 0 reading the input alone & text conversion, sorting, serial split & the single coordinator routing every record, per-message cost \\
+Memory & all records in memory & a few MB per process & only the statistics (no records are kept) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Their speeds are not directly comparable (different languages and machines), but the models are. MPI and MapReduce answer
+once, after all data is there. The streaming system gives an answer at any moment, in milliseconds, because every worker keeps
+its statistics up to date and a query only has to merge the small partial results. The idea is the same in all three: partial
+results that can be merged. What changes is when the merge happens (once at the end, or at every query) and what has to be
+sent for it; the second point is exactly why the interval strategy is so much better than round-robin here.
+
+\textbf{Conclusion.} The streaming system keeps the HW2 analytics correct at every moment of the stream and answers queries
+in milliseconds. Its speed is decided by three things: the number of records per message (each message has a fixed cost, so
+batches of about 1000 are needed), the single coordinator that routes every record (more than 2--4 workers do not help on
+one machine), and the distribution strategy. Splitting by interval keeps every query small, so queries stay fast and do not
+block ingestion, while round-robin makes queries more than 100$\times$ slower and the whole stream 5--7$\times$ slower.
+
+
+\end{document}
