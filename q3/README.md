@@ -1,9 +1,12 @@
-at the server side, all requests are dealt with by creating a new worker thread
+# Notes
 
-at the client side, calling subscribe creates a thread that waits for a stream from the server
+At the server side, all requests are dealt with by creating a new worker thread.\
+In the case of subscribe, the server side thread is permanently created until the subscriber disconnects. This is the simplest solution, but could result in shortage of worker threads.
 
-all operations are done by first locking the entire list of documents
-this is not a huge slowdown since all operations are effectively instant
+At the client side, calling subscribe creates a thread that waits for a stream from the server. All other operations are done sequentially.
+
+All operations are done by first locking the entire list of documents.
+This is not a huge slowdown since all operations are effectively instant.
 
 # Running
 
