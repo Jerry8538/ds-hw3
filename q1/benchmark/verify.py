@@ -23,7 +23,7 @@ try:
 
     if expected != out:
         print("VERIFICATION FAILED")
-    else
+    else:
         print("VERIFICATION PASSED")
 
 except Exception as e:
