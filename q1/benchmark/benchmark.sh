@@ -20,7 +20,7 @@ o=$(($RANDOM%1000+1000))
 # 1xm mxn
 cd type1
 printf "1xm mxn\n"
-printf "generating matrices"
+printf "generating matrices\n"
 
 printf "0 " > A
 for i in $(seq 1 $m); do
@@ -41,8 +41,8 @@ sbatch run.sh
 
 # mxn nx1
 cd ../type2
-printf "\n\nmxn nx1\n"
-printf "generating matrices"
+printf "\nmxn nx1\n"
+printf "generating matrices\n"
 
 printf "" > A
 for i in $(seq 1 $m); do
@@ -62,8 +62,8 @@ sbatch run.sh
 
 # mxn nxo
 cd ../type3
-printf "\n\nmxn nxo\n"
-printf "generating matrices"
+printf "\nmxn nxo\n"
+printf "generating matrices\n"
 
 printf "" > A
 for i in $(seq 1 $m); do
