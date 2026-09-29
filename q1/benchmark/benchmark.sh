@@ -1,3 +1,7 @@
+# TODO CANNOT DO DIFFERENT NUMBER OF TASKS THIS WAY, SINCE ALL SBATCH SCRIPTS
+# ARE TRYING TO READ AND WRITE TO THE SAME FILES WHICH IS A HUGE SLOWDOWN
+# FIX IS TO RUN INDIVIDUALLY AND SEPARATED BY TIME
+
 echo "compiling"
 g++ -g ../mapper.cpp -o mapper
 g++ -g ../reducer.cpp -o reducer
@@ -15,7 +19,6 @@ o=$(($RANDOM%1000+1000))
 # 1. run each one in current directory
 # 2. run sequential version to compare
 # 3. simply overwrite the files A, B, map_, out
-# TODO. different number of tasks
 
 # 1xm mxn
 cd type1
