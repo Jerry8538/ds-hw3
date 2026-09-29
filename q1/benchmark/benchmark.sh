@@ -18,7 +18,8 @@ o=$(($RANDOM%1000+1000))
 # TODO. different number of tasks
 
 # 1xm mxn
-printf "\n\n1xm mxn"
+cd type1
+printf "1xm mxn\n"
 printf "generating matrices"
 
 printf "0 " > A
@@ -37,10 +38,10 @@ for i in $(seq 1 $m); do
 done
 
 sbatch run.sh
-python verify.py
 
 # mxn nx1
-printf "\n\nmxn nx1"
+cd ../type2
+printf "\n\nmxn nx1\n"
 printf "generating matrices"
 
 printf "" > A
@@ -58,10 +59,10 @@ for i in $(seq 1 $m); do
 done
 
 sbatch run.sh
-python verify.py
 
 # mxn nxo
-printf "\n\nmxn nxo"
+cd ../type3
+printf "\n\nmxn nxo\n"
 printf "generating matrices"
 
 printf "" > A
@@ -83,4 +84,3 @@ for i in $(seq 1 $n); do
 done
 
 sbatch run.sh
-python verify.py

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=q8-mapreduce
+#SBATCH --job-name=q1-benchmark-type3
 #SBATCH --nodes=3
 #SBATCH --ntasks=3
 #SBATCH --cpus-per-task=1
@@ -7,7 +7,7 @@
 #SBATCH --time=00:30:00
 #SBATCH --output=%j.log
 #SBATCH --error=%j.err
-#SBATCH -D /home/cs3401.49/ds-hw3/q1/benchmark
+#SBATCH -D /home/cs3401.49/ds-hw3/q1/benchmark/type3
 
 echo "========================================="
 echo "Job id:  $SLURM_JOB_ID"
@@ -29,7 +29,7 @@ TOTAL_START=$(date +%s%N)
 MAPPER_START=$(date +%s%N)
 srun --ntasks=$SLURM_NTASKS bash -c '
     TID=$(printf "%02d" $SLURM_PROCID)
-    ./mapper B "A${TID}" > "map_${TID}"
+    ./../mapper B "A${TID}" > "map_${TID}"
 '
 MAPPER_END=$(date +%s%N)
 printf "MAPPER: "
@@ -37,7 +37,7 @@ $(seconds $MAPPER_END $MAPPER_START)
 
 # reducer (run on single node)
 REDUCER_START=$(date +%s%N)
-./reducer map_* > out
+./../reducer map_* > out
 REDUCER_END=$(date +%s%N)
 echo "REDUCER: "
 $(seconds $REDUCER_END $REDUCER_START)
