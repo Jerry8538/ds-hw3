@@ -32,16 +32,16 @@ srun --ntasks=$SLURM_NTASKS bash -c '
     ./../mapper B "A${TID}" > "map_${TID}"
 '
 MAPPER_END=$(date +%s%N)
-printf "MAPPER: "
-$(seconds $MAPPER_END $MAPPER_START)
+MAPPER_TIME=$(seconds $MAPPER_START $MAPPER_END)
+echo "MAPPER: $MAPPER_TIME"
 
 # reducer (run on single node)
 REDUCER_START=$(date +%s%N)
 ./../reducer map_* > out
 REDUCER_END=$(date +%s%N)
-echo "REDUCER: "
-$(seconds $REDUCER_END $REDUCER_START)
+REDUCER_TIME=$(seconds $REDUCER_START $REDUCER_END)
+echo "REDUCER: $REDUCER_TIME"
 
 TOTAL_END=$(date +%s%N)
-echo "TOTAL: "
-($seconds $TOTAL_END $TOTAL_START)
+TOTAL_TIME=$(seconds $TOTAL_START $TOTAL_END)
+echo "TOTAL: $TOTAL_TIME"

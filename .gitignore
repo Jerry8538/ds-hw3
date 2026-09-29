@@ -1,3 +1,8 @@
+q1/benchmark/type*/A*
+q1/benchmark/type*/B*
+q1/benchmark/type*/map_*
+q1/benchmark/type*/*err
+q1/benchmark/type*/*log
 */__pycache__
 q3/document_pb2.py
 q3/document_pb2_grpc.py
