@@ -37,7 +37,9 @@ for i in $(seq 1 $m); do
     printf "\n" >> B
 done
 
-sbatch run.sh
+for mappers in 2 3 4 5; do
+    sbatch --ntasks=$mappers run.sh
+done
 
 # mxn nx1
 cd ../type2
@@ -58,7 +60,9 @@ for i in $(seq 1 $m); do
     printf "$((i-1)) $(($RANDOM%1000))\n" >> B
 done
 
-sbatch run.sh
+for mappers in 2 3 4 5; do
+    sbatch --ntasks=$mappers run.sh
+done
 
 # mxn nxo
 cd ../type3
@@ -83,4 +87,6 @@ for i in $(seq 1 $n); do
     printf "\n" >> B
 done
 
-sbatch run.sh
+for mappers in 2 3 4 5; do
+    sbatch --ntasks=$mappers run.sh
+done
